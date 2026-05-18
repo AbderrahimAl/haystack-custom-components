@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Any, Dict, List, cast
 
@@ -68,10 +69,19 @@ class RegexValidator:
         failed_regex_hints=List[Dict[str, Any]],
         any_failed=bool,
     )
-    def run(self, alert: dict) -> Dict[str, Any]:
-        # Input type is plain `dict` to match OutputAdapter(output_type=dict)
-        # in the batch pipeline — Haystack 2.x's strict type matching treats
-        # `dict` and `Dict[str, Any]` as different.
+    def run(self, alert: Any) -> Dict[str, Any]:
+        # Accept either a dict or a JSON string. Deepset's hosted UI feeds the
+        # pipeline `query` input as a string, which would otherwise reach this
+        # component unparsed; in batch pipelines an OutputAdapter upstream
+        # already emits a dict, so both shapes occur in practice.
+        if isinstance(alert, str):
+            try:
+                alert = json.loads(alert)
+            except json.JSONDecodeError:
+                alert = {}
+        if not isinstance(alert, dict):
+            alert = {}
+
         raw_value = alert.get(self.field_id, "")
         value = "" if raw_value is None else str(raw_value)
 

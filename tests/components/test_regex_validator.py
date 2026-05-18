@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from dc_custom_component.components.preprocessors.regex_validator import RegexValidator
@@ -61,3 +63,26 @@ def test_invalid_regex_raises_at_init() -> None:
 
     with pytest.raises(ValueError, match="Invalid regex for rule r1"):
         RegexValidator(field_id="email", regex_rules=[bad_rule])
+
+
+def test_alert_as_json_string_is_parsed() -> None:
+    validator = RegexValidator(field_id="email", regex_rules=[EMAIL_RULE])
+
+    out = validator.run(json.dumps({"email": "alice@example.com"}))
+
+    assert out["any_failed"] is False
+    assert out["regex_results"][0]["valid"] is True
+
+
+def test_malformed_json_string_alert_is_treated_as_empty_dict() -> None:
+    validator = RegexValidator(field_id="email", regex_rules=[EMAIL_RULE])
+
+    # Malformed JSON and non-mapping types both degrade to an empty dict —
+    # the field is then missing, so the rule fails on "".
+    out_bad_json = validator.run("not-json{{{")
+    out_non_dict = validator.run(42)  # type: ignore[arg-type]
+
+    assert out_bad_json["any_failed"] is True
+    assert out_bad_json["regex_results"][0]["valid"] is False
+    assert out_non_dict["any_failed"] is True
+    assert out_non_dict["regex_results"][0]["valid"] is False
