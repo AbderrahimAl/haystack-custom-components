@@ -21,7 +21,18 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-  "haystack-ai>=2.10.0"
+  "haystack-ai>=2.10.0",
+  # PaddleOCR stack for the Safety Gate image-OCR component. Pinned to the
+  # versions the local reference output was produced with (see
+  # safety-gate-extraction/requirements-preprocess.txt) so deepset output stays
+  # comparable with it.
+  #
+  # paddleocr pulls paddlex, opencv-contrib-python, pillow and numpy
+  # transitively, so they are deliberately NOT listed here — deepset's base
+  # image already provides numpy, PIL, cv2, pypdfium2 and openpyxl
+  # (measured 2026-07-27, see the runtime-probe experiment note).
+  "paddleocr==3.7.0",
+  "paddlepaddle==3.3.1",
 ]
 dynamic = ["version"]
 
