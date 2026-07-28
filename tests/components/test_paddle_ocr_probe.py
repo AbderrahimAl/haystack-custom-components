@@ -6,10 +6,14 @@ paddle is installed: the measurement scaffolding, the failure capture, and the
 verdict thresholds. Anything needing paddle is skipped when it is absent.
 """
 
-from typing import Any, Dict
+import sys
+import types
+from pathlib import Path
+from typing import Any, Dict, cast
 
 import pytest
 
+from dc_custom_component.components.diagnostics import paddle_ocr_probe as probe_module
 from dc_custom_component.components.diagnostics.paddle_ocr_probe import (
     PaddleOcrProbe,
     _make_test_image,
@@ -88,6 +92,82 @@ def test_verdict_thresholds(limit: float, peak: float, expected: str) -> None:
     }
 
     assert expected in PaddleOcrProbe._verdict(facts)
+
+
+def test_memory_limit_uses_bytes_not_kb(monkeypatch: Any) -> None:
+    """Regression: cgroup `memory.max` is in BYTES, `/proc/self/status` in kB.
+    Dividing the former by 1024 only once reported the observed deepset limit
+    as 4,096,000 MB instead of 4,000 MB — a 1024x overstatement that made every
+    headroom check meaningless."""
+    real_read = Path.read_text
+
+    def _fake_read(self: Path, *args: Any, **kwargs: Any) -> str:
+        if str(self) == "/sys/fs/cgroup/memory.max":
+            return "4194304000"  # the value measured on deepset = 3.91 GiB
+        return cast(str, real_read(self, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "read_text", _fake_read)
+
+    assert probe_module._memory_limit_mb() == 4000.0
+
+
+def test_verdict_treats_mkldnn_rescue_as_a_result_not_a_failure() -> None:
+    """A failed first attempt that the fallback rescued identifies the cause —
+    the verdict must report that, not bury it as a failure."""
+    facts = {
+        "stages": [
+            {"stage": "inference", "ok": False},
+            {"stage": "inference_without_mkldnn", "ok": True},
+        ],
+        "memory": {"limit_mb": 3906.0, "peak_rss_mb": 1600.0},
+        "mkldnn": {"requested": True, "fallback_allowed": True, "working": False},
+    }
+
+    verdict = PaddleOcrProbe._verdict(facts)
+
+    assert "enable_mkldnn=False" in verdict
+    assert "COMFORTABLE" in verdict
+    assert "FAILED" not in verdict
+
+
+def test_verdict_still_fails_when_the_fallback_also_fails() -> None:
+    facts = {
+        "stages": [
+            {"stage": "inference", "ok": False},
+            {"stage": "inference_without_mkldnn", "ok": False},
+        ],
+        "memory": {"limit_mb": 3906.0, "peak_rss_mb": 1600.0},
+        "mkldnn": {"requested": True, "fallback_allowed": True, "working": None},
+    }
+
+    verdict = PaddleOcrProbe._verdict(facts)
+
+    assert verdict.startswith("FAILED at:")
+    assert "inference" in verdict and "inference_without_mkldnn" in verdict
+
+
+def test_mkldnn_flag_reaches_the_reader_builder(monkeypatch: Any) -> None:
+    """`enable_mkldnn` must be threaded through to PaddleOCR, since oneDNN
+    kernels are selected at construction and cannot be toggled later."""
+    captured: Dict[str, Any] = {}
+
+    class _FakePaddleOCR:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    fake_module = types.ModuleType("paddleocr")
+    setattr(fake_module, "PaddleOCR", _FakePaddleOCR)
+    monkeypatch.setitem(sys.modules, "paddleocr", fake_module)
+
+    PaddleOcrProbe()._build_reader("some_rec", enable_mkldnn=False)
+
+    assert captured["enable_mkldnn"] is False
+    assert captured["text_recognition_model_name"] == "some_rec"
+    # The rest must stay identical to ocr_extract.py::build_reader.
+    assert captured["use_textline_orientation"] is True
+    assert captured["use_doc_orientation_classify"] is False
+    assert captured["device"] == "cpu"
+    assert captured["cpu_threads"] == 1
 
 
 def test_verdict_survives_missing_memory_readings() -> None:

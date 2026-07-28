@@ -77,7 +77,10 @@ CACHE_CANDIDATES = (
 # EUR sign — enough to tell "OCR works" from "OCR returns noise".
 DEFAULT_TEST_TEXT = "SAFETY GATE 12345 EUR"
 
+# /proc/self/status values are in kB; cgroup limits are in bytes. Two
+# constants, so a division never silently uses the wrong one.
 _MB = 1024.0
+_BYTES_PER_MB = 1024.0 * 1024.0
 
 
 def _utc_now() -> str:
@@ -108,12 +111,26 @@ def _peak_mb() -> Optional[float]:
 
 
 def _memory_limit_mb() -> Optional[float]:
-    try:
-        raw = Path("/sys/fs/cgroup/memory.max").read_text(encoding="utf-8").strip()
+    """Container memory limit in MB.
+
+    NOTE the unit difference that bit us once already: `/proc/self/status`
+    reports kB (so `/ _MB` is right there), but cgroup `memory.max` reports
+    BYTES and needs dividing twice. Getting this wrong silently inflated the
+    limit 1024x and made every headroom check meaningless.
+    """
+    for path, divisor in (
+        ("/sys/fs/cgroup/memory.max", _BYTES_PER_MB),  # cgroup v2
+        ("/sys/fs/cgroup/memory/memory.limit_in_bytes", _BYTES_PER_MB),  # cgroup v1
+    ):
+        try:
+            raw = Path(path).read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
         if raw.isdigit():
-            return round(int(raw) / _MB, 1)
-    except Exception:
-        pass
+            value = int(raw)
+            # cgroup v1 uses a near-2^63 sentinel to mean "unlimited"
+            if value < 2**62:
+                return round(value / divisor, 1)
     return None
 
 
@@ -204,6 +221,16 @@ class PaddleOcrProbe:
     :param run_inference: OCR the synthetic image after loading.
     :param det_model / rec_model: overridable so cheaper `mobile` variants can
         be measured if `medium` does not fit.
+    :param enable_mkldnn: matches `preprocessing/ocr_extract.py::build_reader`,
+        which passes True. On macOS/arm64 that flag is effectively inert; on
+        deepset's Linux x86_64 it is live, and the oneDNN kernel path under
+        paddle's PIR executor raised
+        `ConvertPirAttribute2RuntimeAttribute not support` during text
+        detection (measured 2026-07-28). Kept True by default so the failure
+        stays reproducible; `mkldnn_fallback` handles the retry.
+    :param mkldnn_fallback: when inference fails and mkldnn was enabled,
+        rebuild the recognizer with it disabled and try once more. Turns "did
+        it break?" and "is mkldnn the cause?" into a single run.
     """
 
     def __init__(
@@ -218,6 +245,8 @@ class PaddleOcrProbe:
         image_width: int = 900,
         image_height: int = 200,
         cache_candidates: Optional[List[str]] = None,
+        enable_mkldnn: bool = True,
+        mkldnn_fallback: bool = True,
     ) -> None:
         self.load_models = load_models
         self.include_cyrillic = include_cyrillic
@@ -231,12 +260,16 @@ class PaddleOcrProbe:
         self.cache_candidates = (
             list(cache_candidates) if cache_candidates else list(CACHE_CANDIDATES)
         )
+        self.enable_mkldnn = enable_mkldnn
+        self.mkldnn_fallback = mkldnn_fallback
 
         self._primary: Any = None
         self._cyrillic: Any = None
         self._stages: List[Dict[str, Any]] = []
         self._checkpoints: List[Dict[str, Any]] = []
         self._warm_up_calls = 0
+        # Which mkldnn setting produced a working inference, once known.
+        self._working_mkldnn: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return cast(
@@ -253,6 +286,8 @@ class PaddleOcrProbe:
                 image_width=self.image_width,
                 image_height=self.image_height,
                 cache_candidates=self.cache_candidates,
+                enable_mkldnn=self.enable_mkldnn,
+                mkldnn_fallback=self.mkldnn_fallback,
             ),
         )
 
@@ -310,19 +345,8 @@ class PaddleOcrProbe:
             return
 
         def _build_primary() -> Dict[str, Any]:
-            from paddleocr import PaddleOCR
-
-            self._primary = PaddleOCR(
-                text_detection_model_name=self.det_model,
-                text_recognition_model_name=self.rec_model,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=True,
-                device="cpu",
-                enable_mkldnn=True,
-                cpu_threads=1,
-            )
-            return {"model": self.rec_model}
+            self._primary = self._build_reader(self.rec_model, self.enable_mkldnn)
+            return {"model": self.rec_model, "mkldnn": self.enable_mkldnn}
 
         # First build pays the weight download; the timing is the cold start.
         self._stage("load_primary_model", _build_primary)
@@ -330,21 +354,44 @@ class PaddleOcrProbe:
         if self.include_cyrillic:
 
             def _build_cyrillic() -> Dict[str, Any]:
-                from paddleocr import PaddleOCR
-
-                self._cyrillic = PaddleOCR(
-                    text_detection_model_name=self.det_model,
-                    text_recognition_model_name=self.cyrillic_model,
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=True,
-                    device="cpu",
-                    enable_mkldnn=True,
-                    cpu_threads=1,
+                self._cyrillic = self._build_reader(
+                    self.cyrillic_model, self.enable_mkldnn
                 )
-                return {"model": self.cyrillic_model}
+                return {"model": self.cyrillic_model, "mkldnn": self.enable_mkldnn}
 
             self._stage("load_cyrillic_model", _build_cyrillic)
+
+    def _build_reader(self, rec_model: str, enable_mkldnn: bool) -> Any:
+        """Construct a PaddleOCR reader.
+
+        Deliberately identical to `preprocessing/ocr_extract.py::build_reader`
+        apart from `enable_mkldnn` being a parameter — anything else diverging
+        would make the measurements incomparable with the local reference.
+        """
+        from paddleocr import PaddleOCR
+
+        return PaddleOCR(
+            text_detection_model_name=self.det_model,
+            text_recognition_model_name=rec_model,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=True,
+            device="cpu",
+            enable_mkldnn=enable_mkldnn,
+            cpu_threads=1,
+        )
+
+    def _infer_once(self, reader: Any, recognized: Dict[str, Any]) -> Dict[str, Any]:
+        """OCR the synthetic image with `reader`, recording the reading."""
+        image = _make_test_image(self.test_text, self.image_width, self.image_height)
+        shaped = _shape_result(reader.predict(image))
+        recognized.clear()
+        recognized.update(shaped)
+        return {
+            "lines": shaped["lines"],
+            "mean_confidence": shaped["mean_confidence"],
+            "text_matches_expected": shaped["text"].strip() == self.test_text,
+        }
 
     @component.output_types(report=str, facts=Dict[str, Any])
     def run(self, query: str = "") -> Dict[str, Any]:
@@ -355,19 +402,23 @@ class PaddleOcrProbe:
 
         recognized: Dict[str, Any] = {}
         if self.run_inference and self._primary is not None:
+            attempt = self._stage(
+                "inference", lambda: self._infer_once(self._primary, recognized)
+            )
+            if attempt["ok"]:
+                self._working_mkldnn = self.enable_mkldnn
+            elif self.mkldnn_fallback and self.enable_mkldnn:
+                # oneDNN kernels are chosen at construction, so the reader has
+                # to be rebuilt — the flag cannot be toggled on a live one.
+                def _rebuild_and_infer() -> Dict[str, Any]:
+                    reader = self._build_reader(self.rec_model, enable_mkldnn=False)
+                    result = self._infer_once(reader, recognized)
+                    self._primary = reader  # keep the one that works
+                    return result
 
-            def _infer() -> Dict[str, Any]:
-                image = _make_test_image(
-                    self.test_text, self.image_width, self.image_height
-                )
-                shaped = _shape_result(self._primary.predict(image))
-                recognized.update(shaped)
-                return {
-                    "lines": shaped["lines"],
-                    "mean_confidence": shaped["mean_confidence"],
-                }
-
-            self._stage("inference", _infer)
+                retry = self._stage("inference_without_mkldnn", _rebuild_and_infer)
+                if retry["ok"]:
+                    self._working_mkldnn = False
 
         facts: Dict[str, Any] = {
             "collected_utc": _utc_now(),
@@ -398,36 +449,63 @@ class PaddleOcrProbe:
             "model_cache": _cache_report(self.cache_candidates),
             "expected_text": self.test_text,
             "recognized": recognized,
+            "mkldnn": {
+                "requested": self.enable_mkldnn,
+                "fallback_allowed": self.mkldnn_fallback,
+                "working": self._working_mkldnn,
+            },
         }
         facts["verdict"] = self._verdict(facts)
         return {"report": self._render(facts), "facts": facts}
 
     @staticmethod
     def _verdict(facts: Dict[str, Any]) -> str:
-        failed = [s["stage"] for s in facts["stages"] if not s["ok"]]
+        stages = facts["stages"]
+        mkldnn = facts.get("mkldnn") or {}
+        working = mkldnn.get("working")
+
+        # A first-attempt inference failure that the fallback then rescued is a
+        # RESULT, not a failure — it identifies mkldnn as the cause. Only treat
+        # stages as fatal when nothing produced a working reading.
+        rescued = (
+            any(s["stage"] == "inference_without_mkldnn" and s["ok"] for s in stages)
+            and working is False
+        )
+        failed = [
+            s["stage"]
+            for s in stages
+            if not s["ok"] and not (rescued and s["stage"] == "inference")
+        ]
         if failed:
             return f"FAILED at: {', '.join(failed)} — see the stage detail below."
 
         limit = facts["memory"]["limit_mb"]
         peak = facts["memory"]["peak_rss_mb"]
+        prefix = "COMPLETED"
+        if rescued:
+            prefix = (
+                "COMPLETED WITH enable_mkldnn=False — mkldnn confirmed as the "
+                "cause of the detection failure; the port must disable it"
+            )
+
         if limit is None or peak is None:
-            return "COMPLETED — memory limit or peak unavailable on this platform."
+            return f"{prefix} — memory limit or peak unavailable on this platform."
 
         headroom = limit - peak
         pct = round(peak / limit * 100)
         if headroom < 256:
             return (
-                f"COMPLETED BUT UNSAFE — peak {peak:.0f} MB of a {limit:.0f} MB limit "
+                f"{prefix}; UNSAFE — peak {peak:.0f} MB of a {limit:.0f} MB limit "
                 f"({pct}%), only {headroom:.0f} MB spare. A larger image would OOM."
             )
         if headroom < 1024:
             return (
-                f"COMPLETED, TIGHT — peak {peak:.0f} MB of {limit:.0f} MB ({pct}%), "
+                f"{prefix}; TIGHT — peak {peak:.0f} MB of {limit:.0f} MB ({pct}%), "
                 f"{headroom:.0f} MB spare. Real alert photos are larger than this "
                 "synthetic test image; measure with a real one before committing."
             )
         return (
-            f"COMPLETED, COMFORTABLE — peak {peak:.0f} MB of {limit:.0f} MB ({pct}%), "
+            f"{prefix}; COMFORTABLE — peak {peak:.0f} MB of {limit:.0f} MB ({pct}%), "
             f"{headroom:.0f} MB spare."
         )
 
@@ -440,6 +518,8 @@ class PaddleOcrProbe:
             f"warm_up calls  {facts['warm_up_calls']}",
             f"config         {facts['config']['rec_model']} "
             f"(cyrillic={facts['config']['include_cyrillic']})",
+            f"mkldnn         requested={facts['mkldnn']['requested']} "
+            f"working={facts['mkldnn']['working']}",
             f"thread env     {facts['thread_env']}",
             "",
             "-- memory --",
@@ -473,9 +553,11 @@ class PaddleOcrProbe:
         recognized = facts["recognized"]
         lines += ["", "-- inference --"]
         if recognized:
+            match = recognized["text"].strip() == facts["expected_text"]
             lines += [
                 f"  expected    {facts['expected_text']!r}",
                 f"  recognized  {recognized['text']!r}",
+                f"  exact match {match}",
                 f"  lines={recognized['lines']} "
                 f"mean_confidence={recognized['mean_confidence']}",
             ]
