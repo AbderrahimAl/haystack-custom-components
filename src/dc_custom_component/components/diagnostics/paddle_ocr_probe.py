@@ -48,6 +48,7 @@ os.environ.setdefault("GLOG_minloglevel", "3")
 os.environ.setdefault("FLAGS_call_stack_level", "0")
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
+import hashlib  # noqa: E402
 import time  # noqa: E402
 import traceback  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
@@ -382,15 +383,26 @@ class PaddleOcrProbe:
         )
 
     def _infer_once(self, reader: Any, recognized: Dict[str, Any]) -> Dict[str, Any]:
-        """OCR the synthetic image with `reader`, recording the reading."""
+        """OCR the synthetic image with `reader`, recording the reading.
+
+        The image SHA-256 is reported so a cross-platform comparison can PROVE
+        the OCR input was identical rather than assume it. If the local and
+        deepset hashes differ, Pillow rendered the font differently and any
+        confidence comparison is meaningless.
+        See `safety-gate-extraction/experiments/parity_check_ocr.py`.
+        """
         image = _make_test_image(self.test_text, self.image_width, self.image_height)
+        digest = hashlib.sha256(image.tobytes()).hexdigest()
         shaped = _shape_result(reader.predict(image))
         recognized.clear()
         recognized.update(shaped)
+        recognized["image_sha256"] = digest
         return {
             "lines": shaped["lines"],
             "mean_confidence": shaped["mean_confidence"],
             "text_matches_expected": shaped["text"].strip() == self.test_text,
+            "image_sha256": digest,
+            "image_shape": list(image.shape),
         }
 
     @component.output_types(report=str, facts=Dict[str, Any])
@@ -560,6 +572,8 @@ class PaddleOcrProbe:
                 f"  exact match {match}",
                 f"  lines={recognized['lines']} "
                 f"mean_confidence={recognized['mean_confidence']}",
+                f"  image sha256 {recognized.get('image_sha256', 'n/a')[:32]}"
+                "   <- must match the local parity check",
             ]
             for entry in recognized["per_line"]:
                 lines.append(f"    {entry['conf']}  {entry['text']!r}")
