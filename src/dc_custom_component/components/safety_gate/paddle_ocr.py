@@ -62,10 +62,11 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 import hashlib  # noqa: E402
 import logging  # noqa: E402
+import re  # noqa: E402
 import tempfile  # noqa: E402
 from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any, Dict, List, Optional, Union, cast  # noqa: E402
+from typing import Any, Dict, List, Optional, Tuple, Union, cast  # noqa: E402
 
 from haystack import (  # noqa: E402
     Document,
@@ -215,6 +216,48 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+# `<alertId>__<folder>__<original name>` — the self-describing upload convention.
+# Deliberately strict: a numeric alert id AND one of the two known folder names.
+# Real attachment names do contain double underscores, and a loose pattern would
+# silently mangle them into bogus provenance.
+_PREFIX_RX = re.compile(
+    r"^(?P<alert>\d+)__(?P<folder>published|restricted)__(?P<name>.+)$"
+)
+
+
+def parse_prefixed_filename(name: str) -> Tuple[str, str, str]:
+    """-> (alert_id, folder, original_name).
+
+    Returns empty strings for alert_id/folder and the name unchanged when the
+    filename does not follow the convention, so callers can treat it as a
+    best-effort source and fall through to their other options.
+    """
+    match = _PREFIX_RX.match(name)
+    if not match:
+        return "", "", name
+    return match.group("alert"), match.group("folder"), match.group("name")
+
+
+def _preload_image() -> Any:
+    """A tiny image WITH TEXT, for the warm-up pass.
+
+    It has to contain text: the textline-orientation model is only invoked once
+    detection finds a box, so a blank canvas would not trigger the download this
+    pass exists to force.
+    """
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+
+    image = Image.new("RGB", (320, 96), "white")
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.load_default(size=40)
+    except TypeError:  # Pillow < 10.1 takes no size argument
+        font = ImageFont.load_default()
+    draw.text((12, 24), "WARMUP 123", fill="black", font=font)
+    return np.asarray(image)[:, :, ::-1].copy()
+
+
 def document_id(alert_id: str, folder: str, image_name: str) -> str:
     """Stable id: the same image always maps to the same Document.
 
@@ -254,12 +297,16 @@ class SafetyGatePaddleOCR:
         enable_mkldnn: bool = False,
         default_folder: str = "published",
         cyrillic_countries: Optional[List[str]] = None,
+        default_alert_id: str = "",
+        preload_on_warm_up: bool = True,
     ) -> None:
         self.include_cyrillic = include_cyrillic
         self.escalate_conf = escalate_conf
         self.max_side = max_side
         self.enable_mkldnn = enable_mkldnn
         self.default_folder = default_folder
+        self.default_alert_id = default_alert_id
+        self.preload_on_warm_up = preload_on_warm_up
         self.cyrillic_countries = (
             [c.upper() for c in cyrillic_countries]
             if cyrillic_countries is not None
@@ -281,6 +328,8 @@ class SafetyGatePaddleOCR:
                 enable_mkldnn=self.enable_mkldnn,
                 default_folder=self.default_folder,
                 cyrillic_countries=self.cyrillic_countries,
+                default_alert_id=self.default_alert_id,
+                preload_on_warm_up=self.preload_on_warm_up,
             ),
         )
 
@@ -291,18 +340,34 @@ class SafetyGatePaddleOCR:
     # --- model lifecycle ----------------------------------------------------
 
     def warm_up(self) -> None:
-        """Build the primary recognizer once per process.
+        """Build the primary recognizer once per process, and force a first pass.
 
         Measured on deepset 2026-07-28: ~6 s import + ~6 s model build, ~1.5 GB
         RSS with both recognizers loaded, weights cached at `~/.paddlex`
         (147 MB). The Cyrillic reader stays lazy, as it does locally — most
         alerts never trigger escalation.
-        """
-        if self._primary is None:
-            import paddleocr
 
-            self._engine = f"paddleocr {paddleocr.__version__}"
-            self._primary = self._build_reader(PRIMARY_REC)
+        The dummy inference is not decoration. `PP-LCNet_x1_0_textline_ori` is
+        built on FIRST PREDICT, not at construction, so without this the first
+        real request pays that download: an observed 2m34s for one image on
+        deepset, versus seconds locally where the model was already cached. A
+        throwaway pass moves that cost into warm-up, where it belongs.
+        """
+        if self._primary is not None:
+            return
+
+        import paddleocr
+
+        self._engine = f"paddleocr {paddleocr.__version__}"
+        self._primary = self._build_reader(PRIMARY_REC)
+
+        if self.preload_on_warm_up:
+            try:
+                self._run_reader(self._primary, _preload_image())
+            except Exception as exc:
+                # A failed pre-load costs latency on the first request, nothing
+                # more — never let it take the component down.
+                logger.warning("OCR pre-load pass failed (harmless): %s", exc)
 
     def _build_reader(self, rec_model: str) -> Any:
         """Identical to ocr_extract.py::build_reader apart from enable_mkldnn."""
@@ -425,11 +490,23 @@ class SafetyGatePaddleOCR:
     def _resolve(self, stream: ByteStream, extra: Dict[str, Any]) -> Dict[str, str]:
         """Work out alert_id, folder and file name for one source.
 
-        Locally these come from the directory layout
-        (`<alertId>/{published,restricted}/<file>`); in deepset there is no such
-        path, so they must arrive as file metadata. Where a `file_path` is
-        present the folder is inferred from it as a fallback, which keeps local
-        round-trip testing working.
+        Locally both come from the directory layout
+        (`<alertId>/{published,restricted}/<file>`). deepset has no such path, so
+        provenance is resolved from four sources, most specific first:
+
+          1. explicit file metadata (`alert_id`, `folder`) — what the fetcher and
+             the SDK upload path provide
+          2. a filename prefix, `<alertId>__<folder>__<original>` — self-describing,
+             and depends on nothing deepset has to do correctly. Needed because
+             `.meta.json` sidecars are silently SKIPPED on UI upload (observed
+             2026-07-28), so metadata cannot be assumed to arrive.
+          3. inference from `file_path` — only fires on a real directory layout,
+             which keeps local round-trip verification working
+          4. init-parameter defaults, then "unknown"
+
+        The prefix is ALWAYS stripped from the reported name, even when metadata
+        supplied the values, so `title:` and `source:` in the markdown carry the
+        original filename and stay byte-comparable with the reference.
         """
         meta: Dict[str, Any] = {**(stream.meta or {}), **extra}
 
@@ -438,7 +515,11 @@ class SafetyGatePaddleOCR:
         if not name:
             name = "image"
 
-        folder = str(meta.get("folder") or "")
+        # (2) — parsed unconditionally, because the name must be stripped even
+        # when metadata wins on the values.
+        prefix_alert, prefix_folder, name = parse_prefixed_filename(name)
+
+        folder = str(meta.get("folder") or "") or prefix_folder
         if not folder and file_path:
             parts = Path(file_path).parts
             for candidate in ("published", "restricted"):
@@ -448,7 +529,7 @@ class SafetyGatePaddleOCR:
         if not folder:
             folder = self.default_folder
 
-        alert_id = str(meta.get("alert_id") or "")
+        alert_id = str(meta.get("alert_id") or "") or prefix_alert
         if not alert_id and file_path:
             parts = Path(file_path).parts
             for index, part in enumerate(parts):
@@ -456,7 +537,7 @@ class SafetyGatePaddleOCR:
                     alert_id = parts[index - 1]
                     break
         if not alert_id:
-            alert_id = "unknown"
+            alert_id = self.default_alert_id or "unknown"
 
         country = str(meta.get("country") or "").upper()
         return {

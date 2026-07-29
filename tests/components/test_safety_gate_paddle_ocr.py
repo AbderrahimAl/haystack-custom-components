@@ -14,6 +14,7 @@ with fake readers.
 from pathlib import Path
 from typing import Any, Dict, List
 
+import pytest
 from haystack.dataclasses import ByteStream
 
 from dc_custom_component.components.safety_gate.paddle_ocr import (
@@ -22,6 +23,7 @@ from dc_custom_component.components.safety_gate.paddle_ocr import (
     SafetyGatePaddleOCR,
     document_id,
     entry_reliability,
+    parse_prefixed_filename,
     render_image_md,
     table_text,
     yaml_str,
@@ -355,6 +357,60 @@ def test_metadata_defaults_when_nothing_is_available() -> None:
     assert resolved["file_name"] == "image"
 
 
+def test_filename_prefix_supplies_provenance_and_is_stripped() -> None:
+    """`<alertId>__<folder>__<original>` — needed because .meta.json sidecars are
+    silently Skipped on UI upload, so metadata cannot be assumed to arrive."""
+    comp = _component()
+    stream = ByteStream(
+        data=b"x", meta={"file_name": "10099538__restricted__20251112_134414.jpg"}
+    )
+
+    resolved = comp._resolve(stream, {})
+
+    assert resolved["alert_id"] == "10099538"
+    assert resolved["folder"] == "restricted"
+    # The prefix must NOT survive into title:/source: or reference parity breaks.
+    assert resolved["file_name"] == "20251112_134414.jpg"
+
+
+def test_prefix_is_stripped_even_when_metadata_wins_on_the_values() -> None:
+    comp = _component()
+    stream = ByteStream(data=b"x", meta={"file_name": "999__published__photo.png"})
+
+    resolved = comp._resolve(stream, {"alert_id": "10099538", "folder": "restricted"})
+
+    assert resolved["alert_id"] == "10099538"  # metadata is more specific
+    assert resolved["folder"] == "restricted"
+    assert resolved["file_name"] == "photo.png"  # but the name is still cleaned
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "20251112_134414.jpg",  # no prefix at all
+        "report__final__v2.jpg",  # double underscores, but not the convention
+        "abc__published__x.jpg",  # non-numeric alert id
+        "123__archive__x.jpg",  # unknown folder name
+    ],
+)
+def test_non_conforming_filenames_are_left_untouched(name: str) -> None:
+    """The pattern is strict on purpose: real attachment names contain double
+    underscores, and a loose match would invent bogus provenance."""
+    alert_id, folder, original = parse_prefixed_filename(name)
+
+    assert (alert_id, folder, original) == ("", "", name)
+
+
+def test_default_alert_id_is_used_before_falling_back_to_unknown() -> None:
+    comp = _component(default_alert_id="10099538")
+
+    assert comp._resolve(ByteStream(data=b"x"), {})["alert_id"] == "10099538"
+
+
+def test_alert_id_is_unknown_with_no_default() -> None:
+    assert _component()._resolve(ByteStream(data=b"x"), {})["alert_id"] == "unknown"
+
+
 def test_explicit_meta_overrides_the_path() -> None:
     comp = _component()
     stream = ByteStream(data=b"x", meta={"file_path": "/data/999/published/p.png"})
@@ -470,3 +526,60 @@ def test_mkldnn_defaults_to_disabled() -> None:
     """Enabling it crashes text detection on deepset's platform — measured
     2026-07-28. The default must not regress."""
     assert SafetyGatePaddleOCR().enable_mkldnn is False
+
+
+def test_warm_up_runs_a_preload_pass(monkeypatch: Any) -> None:
+    """PP-LCNet_x1_0_textline_ori loads on first PREDICT, not at construction —
+    without a throwaway pass the first real request paid 2m34s on deepset."""
+    pytest.importorskip("PIL")
+    pytest.importorskip("numpy")
+
+    reader = _FakeReader(["WARMUP 123"], [0.99])
+    comp = SafetyGatePaddleOCR()
+    monkeypatch.setattr(comp, "_build_reader", lambda rec: reader)
+    monkeypatch.setattr(
+        "dc_custom_component.components.safety_gate.paddle_ocr.paddleocr",
+        None,
+        raising=False,
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules, "paddleocr", type("M", (), {"__version__": "3.7.0"})
+    )
+
+    comp.warm_up()
+
+    assert reader.calls == 1, "warm_up must force one predict pass"
+    assert comp._engine == "paddleocr 3.7.0"
+
+
+def test_warm_up_is_idempotent(monkeypatch: Any) -> None:
+    reader = _FakeReader(["x"], [0.9])
+    comp = SafetyGatePaddleOCR(preload_on_warm_up=False)
+    monkeypatch.setattr(comp, "_build_reader", lambda rec: reader)
+    monkeypatch.setitem(
+        __import__("sys").modules, "paddleocr", type("M", (), {"__version__": "3.7.0"})
+    )
+
+    comp.warm_up()
+    comp.warm_up()
+
+    assert reader.calls == 0  # preload disabled
+    assert comp._primary is reader
+
+
+def test_failed_preload_does_not_break_warm_up(monkeypatch: Any) -> None:
+    """A pre-load failure costs first-request latency, nothing more."""
+
+    class _Exploding:
+        def predict(self, _: Any) -> Any:
+            raise RuntimeError("boom")
+
+    comp = SafetyGatePaddleOCR()
+    monkeypatch.setattr(comp, "_build_reader", lambda rec: _Exploding())
+    monkeypatch.setitem(
+        __import__("sys").modules, "paddleocr", type("M", (), {"__version__": "3.7.0"})
+    )
+
+    comp.warm_up()  # must not raise
+
+    assert comp._primary is not None
