@@ -401,6 +401,35 @@ def test_non_conforming_filenames_are_left_untouched(name: str) -> None:
     assert (alert_id, folder, original) == ("", "", name)
 
 
+def test_filenames_are_normalised_to_nfc() -> None:
+    """Regression: deepset delivered filenames in NFD where the local disk holds
+    NFC. A combining accent is not isalnum(), so sanitize_name turned each one
+    into '_' and "Vizsgálati jegyzőkönyv" became "Vizsga_lati jegyzo_ko_nyv" —
+    breaking byte-parity on every accented filename (observed 2026-07-30)."""
+    import unicodedata
+
+    nfc = "Vizsgálati jegyzőkönyv_6247-2-25_aláírt.pdf"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfd != nfc, "test premise: the two forms must differ as strings"
+
+    _, _, out_nfd = parse_prefixed_filename(nfd)
+    _, _, out_nfc = parse_prefixed_filename(nfc)
+
+    assert out_nfd == out_nfc == nfc
+    assert unicodedata.is_normalized("NFC", out_nfd)
+
+
+def test_nfc_normalisation_survives_the_prefix() -> None:
+    import unicodedata
+
+    nfd = unicodedata.normalize("NFD", "10099538__restricted__Vizsgálati.pdf")
+
+    alert_id, folder, name = parse_prefixed_filename(nfd)
+
+    assert (alert_id, folder) == ("10099538", "restricted")
+    assert name == "Vizsgálati.pdf"
+
+
 def test_default_alert_id_is_used_before_falling_back_to_unknown() -> None:
     comp = _component(default_alert_id="10099538")
 

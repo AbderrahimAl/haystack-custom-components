@@ -64,6 +64,7 @@ import hashlib  # noqa: E402
 import logging  # noqa: E402
 import re  # noqa: E402
 import tempfile  # noqa: E402
+import unicodedata  # noqa: E402
 from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, Dict, List, Optional, Tuple, Union, cast  # noqa: E402
@@ -231,7 +232,15 @@ def parse_prefixed_filename(name: str) -> Tuple[str, str, str]:
     Returns empty strings for alert_id/folder and the name unchanged when the
     filename does not follow the convention, so callers can treat it as a
     best-effort source and fall through to their other options.
+
+    The name is normalised to **NFC** first, and that is not cosmetic. Filenames
+    reached deepset in NFD (`a` + U+0301) where the local disk holds NFC (`á`).
+    A combining accent is not `isalnum()`, so `sanitize_name` turned every one
+    into `_` and "Vizsgálati jegyzőkönyv" rendered as "Vizsga_lati jegyzo_ko_nyv"
+    — a byte-parity break on every accented filename (observed 2026-07-30).
+    NFC is the canonical interchange form and is a no-op on already-NFC input.
     """
+    name = unicodedata.normalize("NFC", name)
     match = _PREFIX_RX.match(name)
     if not match:
         return "", "", name
