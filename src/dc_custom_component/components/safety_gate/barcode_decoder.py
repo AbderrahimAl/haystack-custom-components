@@ -341,12 +341,22 @@ class SafetyGateBarcodeDecoder:
         self,
         sources: List[Union[str, Path, ByteStream]],
         meta: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
+        alert_id: str = "",
     ) -> Dict[str, List[Document]]:
         """Decode every image, grouped by alert. One Document per alert.
 
+        :param alert_id: when set, EVERY source is attributed to this alert,
+            overriding per-source metadata. This is the alert-level entry point:
+            the pipeline is keyed on an alert id, so passing it directly avoids
+            depending on per-file metadata surviving a file download — a
+            `DeepsetFileDownloader` hands over a local cache path, not the
+            original `<alertId>/<folder>/` layout.
+
+            Leave empty for per-source resolution (metadata, then filename
+            prefix, then defaults).
+
         Alerts appear in the output in the order their first image appeared in
-        `sources`, so a single-alert batch behaves identically to the local
-        script.
+        `sources`, so a single-alert call behaves identically to the local script.
         """
         self.warm_up()
 
@@ -363,15 +373,16 @@ class SafetyGateBarcodeDecoder:
             resolved = self._resolve(stream, extra)
             if Path(resolved["file_name"]).suffix.lower() not in IMAGE_EXTS:
                 continue
-            grouped.setdefault(resolved["alert_id"], []).append(
+            # An explicit alert_id wins over anything resolved per source.
+            grouped.setdefault(alert_id or resolved["alert_id"], []).append(
                 (resolved["folder"], resolved["file_name"], stream.data)
             )
 
         # 2. one Document per alert, images in the reference order
         documents: List[Document] = []
-        for alert_id, items in grouped.items():
+        for group_id, items in grouped.items():
             items.sort(key=lambda item: sort_key(item[0], item[1]))
-            documents.append(self._decode_alert(alert_id, items))
+            documents.append(self._decode_alert(group_id, items))
         return {"documents": documents}
 
     def _decode_alert(

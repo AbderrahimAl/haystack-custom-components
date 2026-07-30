@@ -234,6 +234,47 @@ def test_a_batch_with_two_alerts_yields_two_documents() -> None:
     assert {d.id for d in documents} == {document_id("111"), document_id("222")}
 
 
+def test_explicit_alert_id_overrides_per_source_resolution() -> None:
+    """The alert-level entry point: a query pipeline keyed on alert_id passes it
+    straight in, so nothing depends on metadata surviving a file download."""
+    comp = _ScriptedDecoder({})
+
+    documents = comp.run(
+        [_stream("a.jpg", alert="wrong"), _stream("b.jpg", alert="also-wrong")],
+        alert_id="10099538",
+    )["documents"]
+
+    assert len(documents) == 1
+    assert documents[0].meta["alert_id"] == "10099538"
+    assert documents[0].id == document_id("10099538")
+    assert documents[0].content is not None
+    assert "alert_id: 10099538" in documents[0].content
+
+
+def test_explicit_alert_id_collapses_a_mixed_batch_into_one_document() -> None:
+    """Guards against accidentally passing alert_id when sources span alerts —
+    the caller has asserted they all belong to one alert, so they are merged."""
+    comp = _ScriptedDecoder({})
+
+    documents = comp.run(
+        [_stream("a.jpg", alert="111"), _stream("b.jpg", alert="222")],
+        alert_id="333",
+    )["documents"]
+
+    assert len(documents) == 1
+    assert documents[0].meta["images_scanned"] == 2
+
+
+def test_no_alert_id_falls_back_to_per_source_grouping() -> None:
+    comp = _ScriptedDecoder({})
+
+    documents = comp.run(
+        [_stream("a.jpg", alert="111"), _stream("b.jpg", alert="222")]
+    )["documents"]
+
+    assert {d.meta["alert_id"] for d in documents} == {"111", "222"}
+
+
 def test_non_images_are_ignored() -> None:
     comp = _ScriptedDecoder({})
 
