@@ -33,6 +33,10 @@ dependencies = [
   # (measured 2026-07-27, see the runtime-probe experiment note).
   "paddleocr==3.7.0",
   "paddlepaddle==3.3.1",
+  # SafetyGateAlertFetcher: the SGRG gateway and the deepset file upload. httpx
+  # rather than requests because the client it is vendored from uses httpx, so
+  # timeout and error types stay comparable with the original.
+  "httpx>=0.27",
 ]
 dynamic = ["version"]
 
