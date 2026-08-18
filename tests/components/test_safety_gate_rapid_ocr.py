@@ -12,9 +12,7 @@ signature the file claims plus a line the recognizer produced.
 
 
 from dc_custom_component.components.safety_gate.rapid_ocr import (
-    MIN_DEVICE_CHARS,
-    compact,
-    device_signatures,
+
     edit_distance,
     is_device_watermark,
     normalise_result,
