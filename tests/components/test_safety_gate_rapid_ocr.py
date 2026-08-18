@@ -10,7 +10,6 @@ rather than a brand lexicon, so the cases below are written in terms of a
 signature the file claims plus a line the recognizer produced.
 """
 
-from typing import List, Tuple
 
 from dc_custom_component.components.safety_gate.rapid_ocr import (
     MIN_DEVICE_CHARS,
