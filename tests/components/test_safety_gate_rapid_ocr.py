@@ -47,7 +47,9 @@ def test_device_signatures_reads_model_and_make() -> None:
     assert device_signatures({272: "A98 5G", 271: "OPPO"}) == [OPPO]
     # Both survive when the model alone is long enough to be evidence.
     assert device_signatures({272: "Galaxy A14", 271: "Samsung"}) == [
-        "GALAXYA14", "SAMSUNGGALAXYA14"]
+        "GALAXYA14",
+        "SAMSUNGGALAXYA14",
+    ]
     # Model already carries the make: no redundant second signature.
     assert device_signatures({272: "OPPO A98 5G", 271: "OPPO"}) == [OPPO]
     # No model tag: the rule must be disabled, not guess.
@@ -63,8 +65,8 @@ def test_device_signatures_drops_signatures_too_short_to_be_evidence() -> None:
 
 def test_is_device_watermark_tolerates_misreads_but_not_real_product_text() -> None:
     assert is_device_watermark("OPPO A98 5G", [OPPO])
-    assert is_device_watermark("OPPOA985G", [OPPO])       # no spaces at all
-    assert is_device_watermark("OPPO A78 6G", [OPPO])     # two digits misread
+    assert is_device_watermark("OPPOA985G", [OPPO])  # no spaces at all
+    assert is_device_watermark("OPPO A78 6G", [OPPO])  # two digits misread
     assert is_device_watermark("Shot on OPPO A98 5G", [OPPO])
     # Real label text from the same alerts, 7+ edits away.
     for real in ("GUARDIA", "FINANZA", "MILANO", "Arcobaleno parfumes"):
@@ -97,11 +99,17 @@ def test_trailing_timestamp_goes_only_with_a_watermark() -> None:
 
 
 def test_frontmatter_carries_the_count_but_never_the_string() -> None:
-    md = render_markdown("p.jpg", "published", "10092373",
-                         [("Arcobaleno", 0.9)], "rapidocr 2.0", suppressed=1)
+    md = render_markdown(
+        "p.jpg",
+        "published",
+        "10092373",
+        [("Arcobaleno", 0.9)],
+        "rapidocr 2.0",
+        suppressed=1,
+    )
     assert "watermarks_suppressed: 1" in md
     assert "1 line suppressed" in md
-    assert "OPPO" not in md          # re-naming it would restore the bad input
+    assert "OPPO" not in md  # re-naming it would restore the bad input
 
     clean = render_markdown("p.jpg", "published", "1", [("x", 0.9)], "e", suppressed=0)
     assert "watermarks_suppressed" not in clean and "suppressed" not in clean
@@ -109,11 +117,17 @@ def test_frontmatter_carries_the_count_but_never_the_string() -> None:
 
 def test_prefixed_name_and_sort_order() -> None:
     assert parse_prefixed_name("10099538__published__photo.jpg") == (
-        "10099538", "published", "photo.jpg")
+        "10099538",
+        "published",
+        "photo.jpg",
+    )
     assert parse_prefixed_name("photo.jpg") == ("", "", "photo.jpg")
     names = ["1__restricted__a.jpg", "1__published__b.jpg", "loose.jpg"]
     assert sorted(names, key=sort_key) == [
-        "1__published__b.jpg", "1__restricted__a.jpg", "loose.jpg"]
+        "1__published__b.jpg",
+        "1__restricted__a.jpg",
+        "loose.jpg",
+    ]
 
 
 def test_reliability_bands_and_empty_image() -> None:
@@ -127,6 +141,7 @@ def test_normalise_result_handles_both_engine_shapes() -> None:
     class V2:
         txts = ("a", "b")
         scores = (0.9, 0.8)
+
     assert normalise_result(V2()) == [("a", 0.9), ("b", 0.8)]
     legacy = ([[None, "a", 0.9], [None, "b", 0.8]], 0.01)
     assert normalise_result(legacy) == [("a", 0.9), ("b", 0.8)]

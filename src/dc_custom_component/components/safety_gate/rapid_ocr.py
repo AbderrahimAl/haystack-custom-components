@@ -35,7 +35,9 @@ from haystack.dataclasses import ByteStream
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp")
 FOLDER_ORDER = ("published", "restricted")
-PREFIXED = re.compile(r"^(?P<alert>\d+)__(?P<folder>published|restricted)__(?P<name>.+)$")
+PREFIXED = re.compile(
+    r"^(?P<alert>\d+)__(?P<folder>published|restricted)__(?P<name>.+)$"
+)
 
 # Matches the reference OCR pipeline. Full-resolution phone photos are what made
 # the Docling run return nothing at all.
@@ -82,7 +84,9 @@ EXIF_MAKE, EXIF_MODEL = 271, 272
 # `29.4.2026 11:56` - the same overlay, on the line after the model name. Only
 # ever suppressed when it trails a watermark: an unanchored date rule would also
 # match genuine batch codes and best-before dates, which feed the `batches` field.
-STAMP = re.compile(r"^\d{1,4}[.\-/]\d{1,2}[.\-/]\d{1,4}[\s,]+\d{1,2}[:.]\d{2}([:.]\d{2})?$")
+STAMP = re.compile(
+    r"^\d{1,4}[.\-/]\d{1,2}[.\-/]\d{1,4}[\s,]+\d{1,2}[:.]\d{2}([:.]\d{2})?$"
+)
 
 
 def parse_prefixed_name(file_name: str) -> Tuple[str, str, str]:
@@ -121,8 +125,10 @@ def normalise_result(result: Any) -> List[Tuple[str, float]]:
     scores = getattr(result, "scores", None)
     if texts is not None:
         scored = scores if scores is not None else [None] * len(texts)
-        return [(str(text), float(score) if score is not None else 0.0)
-                for text, score in zip(texts, scored)]
+        return [
+            (str(text), float(score) if score is not None else 0.0)
+            for text, score in zip(texts, scored)
+        ]
 
     rows = result[0] if isinstance(result, tuple) else result
     if not rows:
@@ -150,8 +156,13 @@ def edit_distance(left: str, right: str) -> int:
     for i, source in enumerate(left, 1):
         current = [i]
         for j, target in enumerate(right, 1):
-            current.append(min(previous[j] + 1, current[j - 1] + 1,
-                               previous[j - 1] + (source != target)))
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + (source != target),
+                )
+            )
         previous = current
     return previous[-1]
 
@@ -165,6 +176,7 @@ def device_signatures(exif: Any) -> List[str]:
     editor that dropped them, and a missing signature must disable the rule
     rather than fall back to guessing.
     """
+
     def tag(number: int) -> str:
         value = exif.get(number) if exif else None
         if isinstance(value, bytes):
@@ -189,7 +201,7 @@ def is_device_watermark(text: str, signatures: List[str]) -> bool:
     # corpus, which has none, but it costs one branch and would otherwise blow the
     # edit budget on the prefix alone.
     if candidate.startswith("SHOTON"):
-        candidate = candidate[len("SHOTON"):]
+        candidate = candidate[len("SHOTON") :]
     if len(candidate) < MIN_DEVICE_CHARS:
         return False
     return any(
@@ -254,10 +266,14 @@ def render_markdown(
     # brand-shaped token back into the prompt once per photo, which is the exact
     # input that produced the misprediction; it stays recoverable from the report.
     note = (
-        ["", f"_{suppressed} line{'s' if suppressed > 1 else ''} suppressed as a "
-             "camera device watermark (overlay burned in by the phone, not "
-             "product text)._"]
-        if suppressed else []
+        [
+            "",
+            f"_{suppressed} line{'s' if suppressed > 1 else ''} suppressed as a "
+            "camera device watermark (overlay burned in by the phone, not "
+            "product text)._",
+        ]
+        if suppressed
+        else []
     )
     if not pairs:
         lines.append("_No text detected._")
@@ -324,14 +340,21 @@ class SafetyGateRapidOCR:
         if depth >= 2:
             return type(value).__name__
         if isinstance(value, dict):
-            return {str(k): SafetyGateRapidOCR._describe(v, depth + 1)
-                    for k, v in list(value.items())[:60]}
+            return {
+                str(k): SafetyGateRapidOCR._describe(v, depth + 1)
+                for k, v in list(value.items())[:60]
+            }
         if isinstance(value, (list, tuple)):
-            return [SafetyGateRapidOCR._describe(v, depth + 1) for v in list(value)[:12]]
+            return [
+                SafetyGateRapidOCR._describe(v, depth + 1) for v in list(value)[:12]
+            ]
         inner = getattr(value, "__dict__", None)
         if inner:
-            return {k: SafetyGateRapidOCR._describe(v, depth + 1)
-                    for k, v in list(inner.items())[:60] if not k.startswith("_")}
+            return {
+                k: SafetyGateRapidOCR._describe(v, depth + 1)
+                for k, v in list(inner.items())[:60]
+                if not k.startswith("_")
+            }
         return type(value).__name__
 
     def _engine_config(self, engine: Any) -> Dict[str, Any]:
@@ -349,7 +372,8 @@ class SafetyGateRapidOCR:
             if attribute is not None:
                 found[name] = self._describe(attribute)
         found["public_attributes"] = sorted(
-            n for n in dir(engine) if not n.startswith("_"))[:60]
+            n for n in dir(engine) if not n.startswith("_")
+        )[:60]
         found["instance"] = self._describe(getattr(engine, "__dict__", {}) or {})
         return found
 
@@ -448,7 +472,10 @@ class SafetyGateRapidOCR:
             if longest > self.max_side:
                 scale = self.max_side / float(longest)
                 image = image.resize(
-                    (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                    (
+                        max(1, round(image.width * scale)),
+                        max(1, round(image.height * scale)),
+                    ),
                     Image.LANCZOS,
                 )
             return numpy.asarray(image), signatures
@@ -507,10 +534,16 @@ class SafetyGateRapidOCR:
                     },
                 )
             )
-            summary.append({"file": name, "folder": folder,
-                            "lines": len(pairs), "mean_confidence": mean,
-                            "watermarks_suppressed": suppressed,
-                            "device": signatures[0] if signatures else ""})
+            summary.append(
+                {
+                    "file": name,
+                    "folder": folder,
+                    "lines": len(pairs),
+                    "mean_confidence": mean,
+                    "watermarks_suppressed": suppressed,
+                    "device": signatures[0] if signatures else "",
+                }
+            )
 
         return {
             "documents": documents,
@@ -521,7 +554,9 @@ class SafetyGateRapidOCR:
                 "engine_config": self._config,
                 "max_side": self.max_side,
                 "images": len(summary),
-                "watermarks_suppressed": sum(f["watermarks_suppressed"] for f in summary),
+                "watermarks_suppressed": sum(
+                    f["watermarks_suppressed"] for f in summary
+                ),
                 "files": summary,
                 "errors": errors,
             },
