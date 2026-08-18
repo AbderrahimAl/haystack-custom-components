@@ -419,5 +419,3 @@ class SafetyGateBarcodeDecoder:
                 "images_scanned": len(items),
             },
         )
-
-import requests  # sandbox test: undeclared dependency
