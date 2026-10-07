@@ -74,7 +74,10 @@ def build_prefixed_filename(alert_id: str, folder: str, file_name: str) -> str:
     pass because *a* file is there.
     """
     alert = str(alert_id).strip()
-    if not alert.isdigit():
+    # ASCII only: `isdigit` also accepts "²" and other Unicode digits, and
+    # `_PREFIX_RX`'s `\d` does not match all of them, so such an id would pass
+    # here and still be dropped by the parser.
+    if not (alert.isascii() and alert.isdigit()):
         raise ValueError(f"alert_id must be numeric, got {alert_id!r}")
     if folder not in FOLDERS:
         raise ValueError(f"folder must be one of {FOLDERS}, got {folder!r}")
