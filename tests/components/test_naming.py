@@ -82,7 +82,7 @@ def test_non_latin_names_survive() -> None:
     assert clean_attachment_name("检验报告.pdf") == "检验报告.pdf"
 
 
-@pytest.mark.parametrize("alert_id", ["", "abc", "1009-538", "10099538x"])
+@pytest.mark.parametrize("alert_id", ["", "abc", "1009-538", "10099538x", "²", "१२३"])
 def test_rejects_non_numeric_alert_id(alert_id: str) -> None:
     """Better to fail here than to emit a name the strict parser silently drops."""
     with pytest.raises(ValueError, match="numeric"):
