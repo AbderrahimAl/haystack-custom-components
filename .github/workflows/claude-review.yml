@@ -37,13 +37,15 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
 
-          # The official review skill, kept up to date by Anthropic. Project
-          # invariants live in CLAUDE.md section 5, not in this file.
-          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
-          plugins: "code-review@claude-code-plugins"
-          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          # Test: the built-in /code-review skill at high effort instead of the plugin.
+          prompt: |
+            Run the built-in /code-review skill at high effort on
+            ${{ github.repository }}/pull/${{ github.event.pull_request.number }}.
+            Post each finding as an inline comment on the changed line.
 
-          # Required even though the skill's own frontmatter names the same tool:
-          # the action starts the inline-comment MCP server only when
-          # --allowedTools in claude_args names it.
-          claude_args: '--allowedTools "Skill(code-review:*),mcp__github_inline_comment__create_inline_comment"'
+          claude_args: '--allowedTools "Skill(code-review),Skill(code-review:*),Bash(gh pr diff:*),Bash(gh pr view:*),mcp__github_inline_comment__create_inline_comment"'
+          # Headless runs end when Claude ends its turn, so background sub-agents
+          # never report back. Run them in the foreground.
+          settings: '{"env": {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}}'
+          # Test only: the logs of a public repository are public.
+          show_full_output: true
