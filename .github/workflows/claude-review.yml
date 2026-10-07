@@ -1,14 +1,22 @@
 name: Claude review
 
-# Sandbox: `synchronize` IS included here so pushing a fix re-triggers the review
-# while testing. Leave it out in production repos — it means one review per push.
+# Automatic review on PRs into main or dev. #41's Definition of Done requires
+# branching from dev, so both bases have to be covered or half the PRs go unreviewed.
+#
+# `synchronize` is deliberately NOT in the types list: it fires on every push to the
+# branch, and on a subscription plan that is the difference between one review per PR
+# and one per commit. Add it if you want re-review after fixes.
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    branches: [main]
+    types: [opened, ready_for_review, reopened]
+    branches: [main, dev]
+    # Code only. docs/, skill/ and artifacts_final/ are prose and frozen eval
+    # snapshots; reviewing them spends tokens on diffs with no invariants to check.
     paths:
       - "src/**"
-      - ".github/workflows/**"
+      - "preprocessing/**"
+      - "optimization/**"
+      - "reporting/**"
 
 jobs:
   review:
@@ -18,23 +26,24 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout repository
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Claude review
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
+
+          # The official review skill, kept up to date by Anthropic. Project
+          # invariants live in CLAUDE.md section 5, not in this file.
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
           plugins: "code-review@claude-code-plugins"
           prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
-          # Skill(code-review:*): headless runs auto-deny the plugin's Skill call
-          # without it (anthropics/claude-code-action#1467, not yet released).
-          # The rest: the tools the plugin's command declares in its allowed-tools header.
-          claude_args: '--allowedTools "Skill(code-review:*),mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*)"'
-          # Headless runs end when Claude ends its turn, so background sub-agents
-          # never report back. Run them in the foreground.
-          settings: '{"env": {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}}'
-          # Test only: the logs of a public repository are public.
-          show_full_output: true
+
+          # Required even though the skill's own frontmatter names the same tool:
+          # the action starts the inline-comment MCP server only when
+          # --allowedTools in claude_args names it.
+          claude_args: '--allowedTools "Skill(code-review:*),mcp__github_inline_comment__create_inline_comment"'
