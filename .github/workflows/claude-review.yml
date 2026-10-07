@@ -47,5 +47,3 @@ jobs:
           # Headless runs end when Claude ends its turn, so background sub-agents
           # never report back. Run them in the foreground.
           settings: '{"env": {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}}'
-          # Test only: the logs of a public repository are public.
-          show_full_output: true
