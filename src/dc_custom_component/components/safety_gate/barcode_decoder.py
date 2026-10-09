@@ -51,9 +51,11 @@ depends on it.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +81,9 @@ logger = logging.getLogger(__name__)
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 FOLDER_ORDER = ("published", "restricted")
+# Retail symbologies: EAN-8, UPC-A (12), EAN-13 and GTIN-14. Anything else
+# decoded from a product photo is a lab sticker, a QR payload or a partial read.
+RETAIL_RX = re.compile(r"^\d{8}$|^\d{12,14}$")
 
 # Verbatim from barcode_extract.py::render_md — any change breaks byte-parity.
 _DECODES_PREAMBLE = (
@@ -231,6 +236,15 @@ def render_barcode_md(
     return "\n".join(lines)
 
 
+def image_side(data: bytes) -> int:
+    """Shortest side of an image in pixels, read without staging a file."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as image:
+        width, height = image.convert("L").size
+    return min(width, height)
+
+
 def document_id(alert_id: str) -> str:
     """One barcode Document per alert — no folder or filename in the key."""
     return hashlib.sha1(f"safety-gate-barcode|{alert_id}".encode("utf-8")).hexdigest()
@@ -245,7 +259,7 @@ def sort_key(folder: str, file_name: str) -> Tuple[int, str]:
         folder_rank = FOLDER_ORDER.index(folder)
     except ValueError:
         folder_rank = len(FOLDER_ORDER)  # unknown folders sort last, stably
-    return folder_rank, file_name
+    return folder_rank, file_name.lower()
 
 
 @component
@@ -256,6 +270,10 @@ class SafetyGateBarcodeDecoder:
         `pyzbar`. `BARCODE_ENGINE=pyzbar` in the environment also forces pyzbar.
     :param default_folder / default_alert_id: used when a source carries neither
         metadata nor a `<alertId>__<folder>__` filename prefix.
+    :param min_side: images whose shortest side is below this many pixels are
+        skipped (thumbnails, logos). 0 decodes every image.
+    :param retail_only: keep only decodes with a retail barcode length
+        (8, 12, 13 or 14 digits).
     """
 
     def __init__(
@@ -263,10 +281,14 @@ class SafetyGateBarcodeDecoder:
         engine: str = "auto",
         default_folder: str = "published",
         default_alert_id: str = "",
+        min_side: int = 0,
+        retail_only: bool = False,
     ) -> None:
         self.engine = engine
         self.default_folder = default_folder
         self.default_alert_id = default_alert_id
+        self.min_side = min_side
+        self.retail_only = retail_only
         self._resolved_engine: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -277,6 +299,7 @@ class SafetyGateBarcodeDecoder:
                 engine=self.engine,
                 default_folder=self.default_folder,
                 default_alert_id=self.default_alert_id,
+                retail_only=self.retail_only,
             ),
         )
 
@@ -393,12 +416,16 @@ class SafetyGateBarcodeDecoder:
         seen: set = set()
 
         for folder, file_name, data in items:
+            if self.min_side and image_side(data) < self.min_side:
+                continue
             suffix = Path(file_name).suffix.lower() or ".png"
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
                 handle.write(data)
                 staged = Path(handle.name)
             try:
                 for result in self._read(staged):
+                    if self.retail_only and RETAIL_RX.match(result["value"]):
+                        continue
                     key = (result["type"], result["value"])
                     if key not in seen:
                         seen.add(key)

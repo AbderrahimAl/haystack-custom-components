@@ -26,6 +26,7 @@ from dc_custom_component.components.safety_gate.barcode_decoder import (
     SafetyGateBarcodeDecoder,
     document_id,
     render_barcode_md,
+    RETAIL_RX,
     sort_key,
 )
 
@@ -92,11 +93,11 @@ def test_published_sorts_before_restricted() -> None:
     assert sort_key("published", "z.jpg") < sort_key("restricted", "a.jpg")
 
 
-def test_filename_sort_is_case_sensitive() -> None:
+def test_filename_sort_ignores_case() -> None:
     """`sorted(d.iterdir())` is case-sensitive; ocr_extract.list_images
     lowercases. The difference is preserved because dedup attribution
     depends on this order."""
-    assert sort_key("published", "Z.jpg") < sort_key("published", "a.jpg")
+    assert sort_key("published", "a.jpg") < sort_key("published", "Z.jpg")
 
 
 def test_unknown_folders_sort_last() -> None:
@@ -357,3 +358,16 @@ def test_serialization_roundtrip() -> None:
     assert restored.engine == "opencv"
     assert restored.default_folder == "restricted"
     assert restored.default_alert_id == "10099538"
+
+
+def test_retail_pattern_accepts_retail_lengths_only() -> None:
+    assert RETAIL_RX.match("4006381333931")
+    assert RETAIL_RX.match("96385074")
+    assert not RETAIL_RX.match("12345")
+    assert not RETAIL_RX.match("https://example.com")
+
+
+def test_new_options_default_to_off() -> None:
+    comp = SafetyGateBarcodeDecoder()
+    assert comp.min_side == 0
+    assert comp.retail_only is False
